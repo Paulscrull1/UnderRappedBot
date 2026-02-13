@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env.local
+
+# Env and secrets (токены не коммитим)
+.env
+*.env
+
+# DB (локальная БД — каждый поднимает свою)
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE and tools
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+
+# Tests and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# OS
+.DS_Store
+Thumbs.db
