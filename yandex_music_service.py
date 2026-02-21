@@ -1,5 +1,6 @@
 # yandex_music_service.py
 # Единый слой работы с API Яндекс.Музыки (библиотека yandex-music)
+import re
 import random
 import config
 
@@ -134,11 +135,25 @@ def get_chart_tracks(chart_id="world", limit=20):
 
 
 def get_daily_track():
-    """Случайный трек из чарта (для «Трек дня»)."""
+    """
+    Трек дня: один и тот же для всех пользователей, обновляется раз в 24 часа.
+    Сначала проверяет кэш в БД, при истечении или отсутствии — выбирает новый из чарта.
+    """
+    from database import get_cached_daily_track, set_daily_track
+
+    cached = get_cached_daily_track()
+    if cached:
+        track_id = cached[0]
+        track = get_track_by_id(track_id)
+        if track:
+            return track
+        # Трек удалён или недоступен — выберем новый
     tracks = get_chart_tracks(chart_id="world", limit=50)
     if not tracks:
         return None
-    return random.choice(tracks)
+    track = random.choice(tracks)
+    set_daily_track(track["id"])
+    return track
 
 
 def search_tracks(query, limit=5):
@@ -206,6 +221,68 @@ def download_track_bytes(track_id, codec="mp3", bitrate_in_kbps=192):
     except Exception as e:
         print(f"yandex_music_service download_track_bytes error: {e}")
         return None, None, None
+
+
+def _parse_playlist_url(url: str):
+    """
+    Парсит ссылку на плейлист Яндекс.Музыки.
+    Возвращает (owner_id, kind) или None.
+    Поддерживает форматы:
+    - https://music.yandex.ru/playlists/owner.kind (например lk.7517ecdf-7b39-4bfe-bcd9-ab8606d6b063)
+    - https://music.yandex.ru/users/owner/playlists/kind
+    """
+    url = (url or "").strip()
+    if not url:
+        return None
+    # users/owner/playlists/kind
+    m = re.search(r"music\.yandex\.(?:ru|com)/users/([^/]+)/playlists/([^/?]+)", url, re.I)
+    if m:
+        return m.group(1), m.group(2)
+    # /playlists/owner.kind
+    m = re.search(r"music\.yandex\.(?:ru|com)/playlists/([^/?]+)", url, re.I)
+    if not m:
+        return None
+    part = m.group(1)
+    if "." in part:
+        owner, kind = part.split(".", 1)
+        return owner.strip(), kind.strip()
+    return None
+
+
+def get_playlist_tracks(playlist_url: str, limit: int = 500):
+    """
+    Возвращает список треков из плейлиста по ссылке.
+    Формат треков как у get_chart_tracks: id, title, artist, cover_url, genre, track_url.
+    При ошибке возвращает пустой список.
+    """
+    if Client is None:
+        return []
+    parsed = _parse_playlist_url(playlist_url)
+    if not parsed:
+        return []
+    owner_id, kind = parsed
+    try:
+        client = _get_client()
+        playlist = client.users_playlists(kind=kind, user_id=owner_id)
+        if not playlist:
+            return []
+        if not getattr(playlist, "fetch_tracks", None):
+            tracks_raw = getattr(playlist, "tracks", []) or []
+        else:
+            playlist.fetch_tracks()
+            tracks_raw = getattr(playlist, "tracks", []) or []
+        out = []
+        for item in tracks_raw[:limit]:
+            track_short = getattr(item, "track", item)
+            if not track_short:
+                continue
+            d = _to_track_dict(track_short)
+            if d.get("id"):
+                out.append(d)
+        return out
+    except Exception as e:
+        print(f"yandex_music_service get_playlist_tracks error: {e}")
+        return []
 
 
 def get_track_by_id(track_id):

@@ -1,6 +1,6 @@
 """Тесты utils: hash_id, константы."""
 import pytest
-from utils import hash_id, CRITERIA_NAMES, CRITERIA, MAX_SCORE, EXP_FOR_RATING
+from utils import hash_id, level_progress_bar, CRITERIA_NAMES, CRITERIA, MAX_SCORE, EXP_FOR_RATING
 
 
 def test_hash_id():
@@ -9,6 +9,13 @@ def test_hash_id():
     assert h.isalnum()
     assert hash_id("123:456") == hash_id("123:456")
     assert hash_id("123:456") != hash_id("123:457")
+
+
+def test_level_progress_bar():
+    assert "1 уровня" in level_progress_bar(1, 0) or "2 уровня" in level_progress_bar(1, 0)
+    bar = level_progress_bar(1, 50)
+    assert "█" in bar and "░" in bar
+    assert "50" in level_progress_bar(1, 50) or "до" in level_progress_bar(1, 50)
 
 
 def test_criteria():

@@ -37,13 +37,28 @@ def init_db():
         )
     ''')
 
-    # Таблица для постоянного хранения никнейма пользователя
+    # Таблица пользователей: никнейм, профиль (аватар, описание, закреплённый трек)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            nickname TEXT NOT NULL
+            nickname TEXT NOT NULL,
+            avatar_file_id TEXT,
+            description TEXT,
+            pinned_track_id TEXT,
+            pinned_track_title TEXT,
+            pinned_track_artist TEXT
         )
     ''')
+    users_cols = {col[1] for col in cursor.execute("PRAGMA table_info(users)").fetchall()}
+    for col_name, col_def in [
+        ("avatar_file_id", "ALTER TABLE users ADD COLUMN avatar_file_id TEXT"),
+        ("description", "ALTER TABLE users ADD COLUMN description TEXT"),
+        ("pinned_track_id", "ALTER TABLE users ADD COLUMN pinned_track_id TEXT"),
+        ("pinned_track_title", "ALTER TABLE users ADD COLUMN pinned_track_title TEXT"),
+        ("pinned_track_artist", "ALTER TABLE users ADD COLUMN pinned_track_artist TEXT"),
+    ]:
+        if col_name not in users_cols:
+            cursor.execute(col_def)
 
     # Проверяем, есть ли новые колонки, и добавляем при необходимости
     existing_columns = {col[1] for col in cursor.execute("PRAGMA table_info(reviews)").fetchall()}
@@ -75,6 +90,81 @@ def init_db():
         )
     ''')
 
+    # Скачанные пользователем треки (по кнопке «Скачать»); message_id/chat_id для пересылки
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_downloads (
+            user_id INTEGER,
+            track_id TEXT,
+            track_title TEXT,
+            track_artist TEXT,
+            downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            message_id INTEGER,
+            chat_id INTEGER,
+            PRIMARY KEY (user_id, track_id)
+        )
+    ''')
+    existing = {col[1] for col in cursor.execute("PRAGMA table_info(user_downloads)").fetchall()}
+    if 'message_id' not in existing:
+        cursor.execute("ALTER TABLE user_downloads ADD COLUMN message_id INTEGER")
+    if 'chat_id' not in existing:
+        cursor.execute("ALTER TABLE user_downloads ADD COLUMN chat_id INTEGER")
+
+    # Трек дня: один общий трек, обновляется раз в 24 часа
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS daily_track (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            track_id TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+
+DAILY_TRACK_TTL_SECONDS = 86400  # 24 часа
+
+
+def get_cached_daily_track():
+    """
+    Возвращает (track_id, updated_at) если трек дня закэширован и не старше 24 ч,
+    иначе None.
+    """
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute('SELECT track_id, updated_at FROM daily_track WHERE id = 1')
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    track_id, updated_at = row[0], row[1]
+    if not track_id or not updated_at:
+        return None
+    try:
+        from datetime import datetime, timezone
+        updated = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        age = (now - updated).total_seconds()
+        if age < 0 or age > DAILY_TRACK_TTL_SECONDS:
+            return None
+        return (track_id, updated_at)
+    except Exception:
+        return None
+
+
+def set_daily_track(track_id: str):
+    """Сохраняет трек дня и время обновления (UTC)."""
+    from datetime import datetime, timezone
+    conn = _connect()
+    cursor = conn.cursor()
+    now_utc = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        'INSERT INTO daily_track (id, track_id, updated_at) VALUES (1, ?, ?) '
+        'ON CONFLICT(id) DO UPDATE SET track_id = ?, updated_at = ?',
+        (track_id, now_utc, track_id, now_utc),
+    )
     conn.commit()
     conn.close()
 
@@ -107,6 +197,78 @@ def get_user_nickname(user_id: int) -> str:
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else None
+
+
+def get_profile(user_id: int) -> dict:
+    """
+    Профиль пользователя: nickname, avatar_file_id, description, pinned_track_*.
+    """
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT nickname, avatar_file_id, description, pinned_track_id, pinned_track_title, pinned_track_artist '
+        'FROM users WHERE user_id = ?',
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'nickname': row[0] or 'Без имени',
+        'avatar_file_id': row[1],
+        'description': row[2] or '',
+        'pinned_track_id': row[3],
+        'pinned_track_title': row[4],
+        'pinned_track_artist': row[5],
+    }
+
+
+def update_profile_avatar(user_id: int, file_id: str):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO users (user_id, nickname) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING',
+        (user_id, f'User_{user_id}'),
+    )
+    cursor.execute('UPDATE users SET avatar_file_id = ? WHERE user_id = ?', (file_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+def update_profile_description(user_id: int, description: str):
+    description = (description or '').strip()[:500]
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO users (user_id, nickname) VALUES (?, ?) ON CONFLICT(user_id) DO NOTHING',
+        (user_id, get_user_nickname(user_id) or f'User_{user_id}'),
+    )
+    cursor.execute('UPDATE users SET description = ? WHERE user_id = ?', (description, user_id))
+    conn.commit()
+    conn.close()
+
+
+def set_pinned_track(user_id: int, track_id: str, title: str, artist: str):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        'UPDATE users SET pinned_track_id = ?, pinned_track_title = ?, pinned_track_artist = ? WHERE user_id = ?',
+        (track_id, (title or '')[:200], (artist or '')[:200], user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_pinned_track(user_id: int):
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        'UPDATE users SET pinned_track_id = NULL, pinned_track_title = NULL, pinned_track_artist = NULL WHERE user_id = ?',
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
 
 
 def save_review(user_id, track_id, ratings, track_title, track_artist, nickname, genre=None, review_text=None):
@@ -195,6 +357,23 @@ def get_top_tracks_by_rating(limit=10):
     ]
 
 
+def get_track_rating_stats(track_id: str):
+    """
+    Средний балл и количество оценок по треку. Возвращает None, если оценок нет.
+    """
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT AVG(total), COUNT(*) FROM reviews WHERE track_id = ?',
+        (track_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row or row[1] == 0:
+        return None
+    return {'avg': round(row[0], 1), 'count': row[1]}
+
+
 def get_last_reviews_global(limit=10):
     """
     Последние оценки всех пользователей
@@ -274,6 +453,44 @@ def get_favorites(user_id: int, limit=50):
     return [{'track_id': r[0], 'title': r[1], 'artist': r[2]} for r in rows]
 
 
+def add_download(
+    user_id: int,
+    track_id: str,
+    track_title: str,
+    track_artist: str,
+    message_id: int = None,
+    chat_id: int = None,
+):
+    """Сохраняет факт скачивания трека и сообщение с аудио (для пересылки в «Мои скачанные»)."""
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO user_downloads
+        (user_id, track_id, track_title, track_artist, downloaded_at, message_id, chat_id)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+    ''', (user_id, track_id, track_title, track_artist, message_id, chat_id))
+    conn.commit()
+    conn.close()
+
+
+def get_downloads(user_id: int, limit=50):
+    """Список скачанных треков (последние первыми); message_id/chat_id для быстрого копирования."""
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT track_id, track_title, track_artist, message_id, chat_id
+        FROM user_downloads
+        WHERE user_id = ?
+        ORDER BY downloaded_at DESC LIMIT ?
+    ''', (user_id, limit))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {'track_id': r[0], 'title': r[1], 'artist': r[2], 'message_id': r[3], 'chat_id': r[4]}
+        for r in rows
+    ]
+
+
 # --- LVL / Exp ---
 
 def add_exp(user_id: int, amount: int):
@@ -326,3 +543,24 @@ def get_user_progress(user_id: int):
     exp = row[0] if row else 0
     level = 1 + exp // 100
     return {'exp': exp, 'level': level}
+
+
+def get_leaderboard(limit: int = 20):
+    """
+    Лидерборд по EXP: user_id, nickname, exp, level.
+    """
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT p.user_id, COALESCE(u.nickname, 'Пользователь ' || p.user_id), p.exp
+        FROM user_progress p
+        LEFT JOIN users u ON u.user_id = p.user_id
+        ORDER BY p.exp DESC
+        LIMIT ?
+    ''', (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {'user_id': r[0], 'nickname': r[1] or f'User_{r[0]}', 'exp': r[2], 'level': 1 + r[2] // 100}
+        for r in rows
+    ]

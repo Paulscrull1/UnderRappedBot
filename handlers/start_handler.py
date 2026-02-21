@@ -3,7 +3,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from keyboards import main_menu
 from database import get_user_nickname, save_user_nickname, get_user_progress
-from utils import user_states
+from utils import user_states, level_progress_bar
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -24,11 +24,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_states[user_id] = {'stage': 'menu', 'nickname': nickname}
     progress = get_user_progress(user_id)
     lvl, exp = progress["level"], progress["exp"]
-    exp_to_next = (lvl * 100) - exp  # до следующего уровня
+    bar = level_progress_bar(lvl, exp)
 
     await update.message.reply_text(
         f"🎧 *С возвращением, {nickname}!*\n\n"
-        f"📊 Уровень *{lvl}*  ·  EXP: *{exp}*  ·  до след. уровня: *{exp_to_next}*\n"
+        f"📊 {bar}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"Выбери действие:",
         reply_markup=main_menu(),
@@ -63,19 +63,27 @@ async def handle_nickname(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Кнопка 'Назад' — возвращает в главное меню.
-    Если сообщение с фото (карточка трека), edit_message_text не сработает — удаляем и отправляем новое.
+    Если были показаны «Мои скачанные», удаляем пересланные аудио из чата.
     """
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    nickname = get_user_nickname(user_id) or user_states.get(user_id, {}).get("nickname") or "Пользователь"
+    state = user_states.get(user_id, {})
+    to_delete = state.get("messages_to_delete_on_back") or []
+    for cid, mid in to_delete:
+        try:
+            await context.bot.delete_message(chat_id=cid, message_id=mid)
+        except Exception:
+            pass
+    nickname = get_user_nickname(user_id) or state.get("nickname") or "Пользователь"
+    user_states[user_id] = {"stage": "menu", "nickname": nickname}
     progress = get_user_progress(user_id)
     lvl, exp = progress["level"], progress["exp"]
-    exp_to_next = max(0, (lvl * 100) - exp)
+    bar = level_progress_bar(lvl, exp)
     text = (
         f"🎵 *Главное меню*\n\n"
         f"Привет, {nickname}!\n\n"
-        f"📊 Уровень *{lvl}*  ·  EXP: *{exp}*  ·  до след. уровня: *{exp_to_next}*\n"
+        f"📊 {bar}\n"
         f"━━━━━━━━━━━━━━━━\n"
         "Выбери действие:"
     )

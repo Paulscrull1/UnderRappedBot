@@ -2,7 +2,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from utils import user_states, hash_id, hash_to_track_id
-from keyboards import back_to_menu_button
+from keyboards import back_to_menu_button, cancel_review_button
 import sqlite3
 
 
@@ -31,7 +31,23 @@ async def ask_for_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'track_id': track_id
     }
 
-    await query.edit_message_text("✍️ Напиши свою рецензию (до 500 символов):")
+    await query.edit_message_text(
+        "✍️ Напиши свою рецензию (до 500 символов):",
+        reply_markup=cancel_review_button(),
+    )
+
+
+async def cancel_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена ввода рецензии — возврат в меню."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_states.get(user_id, {}).get("stage") == "writing_review":
+        del user_states[user_id]
+    await query.edit_message_text(
+        "❌ Рецензия отменена.",
+        reply_markup=back_to_menu_button(),
+    )
 
 
 async def show_reviews_for_track(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -10,3 +10,7 @@ except ImportError:
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 YANDEX_MUSIC_TOKEN = os.environ.get("YANDEX_MUSIC_TOKEN", "")
+# Опционально: ID чата/канала для хранения аудио. Создай канал, добавь бота как админа,
+# перешли любое сообщение из канала боту @userinfobot или @getidsbot — получишь ID (например -1001234567890).
+# Тогда «Мои скачанные» копирует треки оттуда, а сообщение пользователю удаляется при «Назад в меню».
+STORAGE_CHAT_ID = os.environ.get("STORAGE_CHAT_ID", "").strip() or None

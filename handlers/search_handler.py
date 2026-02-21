@@ -17,6 +17,7 @@ async def start_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Напиши в формате:\n*Исполнитель — Название трека*\n\n"
         "Пример: `Платина — Бассок`",
         parse_mode="Markdown",
+        reply_markup=back_to_menu_button(),
     )
 
 
@@ -26,15 +27,17 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("🔍 Ищу трек...")
-    tracks = search_track(query, limit=5)
+    tracks = search_track(query, limit=1)
 
     if not tracks:
-        await update.message.reply_text("❌ Не нашёл такой трек. Попробуй уточнить:\nИсполнитель — Название")
+        await update.message.reply_text(
+            "❌ Не нашёл такой трек. Попробуй уточнить:\nИсполнитель — Название",
+            reply_markup=back_to_menu_button(),
+        )
         return
 
-    track = tracks[0]
     user_id = update.message.from_user.id
-    await send_track_card(update.message, track["id"], user_id, track_dict=track)
+    await send_track_card(update.message, tracks[0]["id"], user_id, track_dict=tracks[0])
 
 
 async def handle_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

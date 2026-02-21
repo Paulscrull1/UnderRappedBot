@@ -28,6 +28,21 @@ EXP_FOR_FAVORITE = 5
 hash_to_track_id = {}
 
 
+def level_progress_bar(level: int, exp: int, width: int = 10) -> str:
+    """
+    Строка прогресс-бара уровня: [████░░░░░░] 40 EXP до 2 уровня.
+    exp — текущий EXP, level — текущий уровень; до следующего: (level * 100) - exp.
+    """
+    exp_in_level = exp % 100  # EXP в рамках текущего уровня (0..99)
+    exp_to_next = 100 - exp_in_level
+    if exp_to_next == 100 and exp > 0:
+        exp_to_next = 100  # на границе уровня
+    filled = (exp_in_level * width) // 100
+    bar = "█" * filled + "░" * (width - filled)
+    next_lvl = level + 1
+    return f"[{bar}] {exp_to_next} EXP до {next_lvl} уровня"
+
+
 def hash_id(track_id: str) -> str:
     """
     Создаёт короткий (10 символов) MD5-хэш из любого track_id.

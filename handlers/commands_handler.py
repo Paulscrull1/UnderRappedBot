@@ -1,13 +1,31 @@
 # handlers/commands_handler.py
-# Команды: /chart, /daily, /stats, /search <запрос>
+# Команды: /info, /chart, /daily, /stats, /search <запрос>
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from yandex_music_service import get_chart_tracks, get_daily_track
 from yandex import search_track
 from database import get_last_reviews, get_user_progress, get_favorites
 from keyboards import chart_list_buttons_paginated, back_to_menu_button, main_menu
-from utils import hash_id, hash_to_track_id
+from utils import hash_id, hash_to_track_id, level_progress_bar
 from handlers.track_card_handler import send_track_card
+
+
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /info — информация о боте и список команд."""
+    text = (
+        "🎧 *Музыкальный бот*\n\n"
+        "Ищи треки, ставь оценки по 5 критериям, пиши рецензии, копи EXP и прокачивай уровень. "
+        "Профиль с аватаркой, описанием и закреплённым треком. Лидерборд — самые активные пользователи.\n\n"
+        "*Команды:*\n"
+        "/start — главное меню\n"
+        "/info — эта справка\n"
+        "/chart — чарт Яндекс.Музыки\n"
+        "/daily — трек дня\n"
+        "/stats — моя статистика\n"
+        "/search _запрос_ — быстрый поиск трека\n\n"
+        "Всё остальное — через кнопки в меню."
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -51,7 +69,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not reviews:
         await update.message.reply_text(
-            f"📊 Уровень {progress['level']} | EXP: {progress['exp']} | 🤍 Избранное: {fav_count}\n\n"
+            f"📊 {level_progress_bar(progress['level'], progress['exp'])}\n"
+            f"🤍 Избранное: {fav_count}\n\n"
             "У тебя пока нет оценок. Самое время начать! 🎧",
             reply_markup=main_menu(),
         )
@@ -59,7 +78,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = (
         f"📊 *Моя статистика*\n"
-        f"Уровень {progress['level']} | EXP: {progress['exp']} | 🤍 Избранное: {fav_count}\n\n"
+        f"{level_progress_bar(progress['level'], progress['exp'])}\n"
+        f"🤍 Избранное: {fav_count}\n\n"
         "📌 Твои последние 10 оценок:\n\n"
     )
     buttons = [[InlineKeyboardButton(f"🤍 Моё избранное ({fav_count})", callback_data="view_favorites")]]
@@ -87,7 +107,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = " ".join(query_text).strip()
     await update.message.reply_text("🔍 Ищу трек...")
-    tracks = search_track(query, limit=5)
+    tracks = search_track(query, limit=1)
     if not tracks:
         await update.message.reply_text(
             "❌ Не нашёл такой трек. Попробуй: /search Исполнитель — Название"

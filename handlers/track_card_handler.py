@@ -1,10 +1,14 @@
 # handlers/track_card_handler.py
 """Единая карточка трека и обработчики кнопок: Оценить, Рецензия, Скачать, Избранное."""
+import asyncio
 import io
+import logging
 from telegram import Update, InputFile
 from telegram.ext import ContextTypes
+from telegram.error import TimedOut, BadRequest
 from yandex_music_service import get_track_by_id, download_track_bytes
-from database import is_in_favorites, add_favorite, remove_favorite, add_exp
+import config
+from database import is_in_favorites, add_favorite, remove_favorite, add_exp, add_download, get_track_rating_stats
 from keyboards import track_card_buttons, rating_buttons
 from utils import user_states, hash_to_track_id, CRITERIA_NAMES, EXP_FOR_FAVORITE
 from database import get_user_nickname
@@ -18,11 +22,18 @@ def _get_track_dict(track_id, track_dict=None):
 
 
 def build_card_caption(track):
-    """Текст карточки: название, исполнитель, жанр."""
+    """Текст карточки: название, исполнитель, жанр; средний балл из БД при наличии."""
     title = track.get("title", "Без названия")
     artist = track.get("artist", "Неизвестен")
     genre = track.get("genre", "—")
-    return f"🎧 *{title}*\n👤 {artist}\n🏷 {genre}\n━━━━━━━━━━━━━━━━"
+    lines = [f"🎧 *{title}*", f"👤 {artist}", f"🏷 {genre}"]
+    track_id = track.get("id")
+    if track_id:
+        stats = get_track_rating_stats(track_id)
+        if stats:
+            lines.append(f"📊 Средний балл: {stats['avg']}/50, оценок: {stats['count']}")
+    lines.append("━━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
 
 
 async def send_track_card(message_or_query, track_id, user_id, track_dict=None, parse_mode="Markdown"):
@@ -56,6 +67,70 @@ async def handle_chart_track(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not data.startswith("chart_track_"):
         return
     track_hash = data.replace("chart_track_", "", 1)
+    if track_hash not in hash_to_track_id:
+        await query.edit_message_text("❌ Трек не найден.", reply_markup=None)
+        return
+    track_id = hash_to_track_id[track_hash]
+    user_id = query.from_user.id
+    track = _get_track_dict(track_id)
+    if not track:
+        await query.edit_message_text("❌ Не удалось загрузить трек.")
+        return
+    caption = build_card_caption(track)
+    url = track.get("track_url") or ""
+    in_fav = is_in_favorites(user_id, track["id"])
+    markup = track_card_buttons(track["id"], url, in_fav)
+    photo = track.get("cover_url")
+    try:
+        if photo:
+            await query.message.reply_photo(photo=photo, caption=caption, reply_markup=markup, parse_mode="Markdown")
+        else:
+            await query.message.reply_text(caption, reply_markup=markup, parse_mode="Markdown")
+        await query.delete_message()
+    except Exception:
+        await query.edit_message_text(caption, reply_markup=markup, parse_mode="Markdown")
+
+
+async def handle_playlist_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback playlist_track_{hash} — карточка трека из плейлиста (как в чарте)."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if not data.startswith("playlist_track_"):
+        return
+    track_hash = data.replace("playlist_track_", "", 1)
+    if track_hash not in hash_to_track_id:
+        await query.edit_message_text("❌ Трек не найден.", reply_markup=None)
+        return
+    track_id = hash_to_track_id[track_hash]
+    user_id = query.from_user.id
+    track = _get_track_dict(track_id)
+    if not track:
+        await query.edit_message_text("❌ Не удалось загрузить трек.")
+        return
+    caption = build_card_caption(track)
+    url = track.get("track_url") or ""
+    in_fav = is_in_favorites(user_id, track["id"])
+    markup = track_card_buttons(track["id"], url, in_fav)
+    photo = track.get("cover_url")
+    try:
+        if photo:
+            await query.message.reply_photo(photo=photo, caption=caption, reply_markup=markup, parse_mode="Markdown")
+        else:
+            await query.message.reply_text(caption, reply_markup=markup, parse_mode="Markdown")
+        await query.delete_message()
+    except Exception:
+        await query.edit_message_text(caption, reply_markup=markup, parse_mode="Markdown")
+
+
+async def handle_search_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback search_track_{hash} — карточка трека из результатов поиска."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if not data.startswith("search_track_"):
+        return
+    track_hash = data.replace("search_track_", "", 1)
     if track_hash not in hash_to_track_id:
         await query.edit_message_text("❌ Трек не найден.", reply_markup=None)
         return
@@ -119,6 +194,22 @@ async def handle_rate_track(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Блокировка повторного нажатия «Скачать»: (user_id, track_id) в процессе загрузки
 _downloading = set()
 
+DOWNLOAD_MAX_ATTEMPTS = 3
+DOWNLOAD_RETRY_DELAY = 2
+
+
+async def _retry_on_timeout(coro, max_attempts=DOWNLOAD_MAX_ATTEMPTS, delay=DOWNLOAD_RETRY_DELAY):
+    """Выполняет coroutine с повтором при telegram.error.TimedOut."""
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            return await coro()
+        except TimedOut as e:
+            last_error = e
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(delay)
+    raise last_error
+
 
 def _download_key(user_id: int, track_id: str):
     return (user_id, track_id)
@@ -145,9 +236,13 @@ async def handle_download_track(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer("⏳ Начинаю загрузку...")
     status_msg = None
     try:
-        status_msg = await query.message.reply_text("⏳ _Загрузка трека началась..._", parse_mode="Markdown")
+        # Этап 1: сообщение и загрузка из Яндекса
+        status_msg = await query.message.reply_text(
+            "⏳ _Загружаю трек из Яндекс.Музыки..._", parse_mode="Markdown"
+        )
         audio_bytes, title, performer = download_track_bytes(track_id)
-        if not audio_bytes:
+
+        if not audio_bytes or len(audio_bytes) == 0:
             if status_msg:
                 await status_msg.edit_text(
                     "❌ Не удалось скачать трек. Проверьте токен Яндекс.Музыки и доступность трека."
@@ -157,18 +252,80 @@ async def handle_download_track(update: Update, context: ContextTypes.DEFAULT_TY
             if status_msg:
                 await status_msg.edit_text("❌ Файл слишком большой для отправки в Telegram (лимит 50 МБ).")
             return
+
+        # Этап 2: отправка в Telegram
         if status_msg:
-            await status_msg.edit_text("✅ _Отправляю файл..._", parse_mode="Markdown")
+            await status_msg.edit_text("✅ _Трек загружен. Отправляю в Telegram..._", parse_mode="Markdown")
         filename = f"{performer} - {title}.mp3"[:60].strip() or "track.mp3"
         bio = io.BytesIO(audio_bytes)
         bio.name = filename
-        await query.message.reply_audio(
-            audio=InputFile(bio, filename=filename),
-            title=title[:64] if title else None,
-            performer=performer[:64] if performer else None,
-        )
+
+        async def send_audio():
+            bio.seek(0)
+            return await query.message.reply_audio(
+                audio=InputFile(bio, filename=filename),
+                title=title[:64] if title else None,
+                performer=performer[:64] if performer else None,
+            )
+
+        try:
+            audio_msg = await _retry_on_timeout(lambda: send_audio())
+            if config.STORAGE_CHAT_ID:
+                try:
+                    bio.seek(0)
+                    storage_msg = await context.bot.send_audio(
+                        chat_id=config.STORAGE_CHAT_ID,
+                        audio=InputFile(bio, filename=filename),
+                        title=title[:64] if title else None,
+                        performer=performer[:64] if performer else None,
+                    )
+                    add_download(
+                        user_id, track_id,
+                        title or "Без названия", performer or "Неизвестен",
+                        message_id=storage_msg.message_id,
+                        chat_id=storage_msg.chat_id,
+                    )
+                    state = user_states.get(user_id, {})
+                    to_del = state.get("messages_to_delete_on_back") or []
+                    to_del.append((audio_msg.chat_id, audio_msg.message_id))
+                    user_states[user_id] = {**state, "messages_to_delete_on_back": to_del}
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "Не удалось отправить трек в хранилище (STORAGE_CHAT_ID): %s. Сохраняю сообщение пользователя.",
+                        e,
+                    )
+                    add_download(
+                        user_id, track_id,
+                        title or "Без названия", performer or "Неизвестен",
+                        message_id=audio_msg.message_id,
+                        chat_id=audio_msg.chat_id,
+                    )
+            else:
+                add_download(
+                    user_id, track_id,
+                    title or "Без названия", performer or "Неизвестен",
+                    message_id=audio_msg.message_id,
+                    chat_id=audio_msg.chat_id,
+                )
+        except TimedOut:
+            if status_msg:
+                await status_msg.edit_text(
+                    "❌ Таймаут при _отправке файла в Telegram_. Трек с Яндекса загружен, но Telegram не принял за время. Попробуй ещё раз или при медленном интернете подожди."
+                )
+            return
+        except BadRequest as e:
+            if status_msg:
+                msg = "❌ Не удалось отправить файл в Telegram."
+                if "non-empty" in str(e).lower() or "empty" in str(e).lower():
+                    msg = "❌ Файл трека пришёл пустым. Попробуй другой трек или нажми «Скачать» ещё раз."
+                await status_msg.edit_text(msg)
+            return
+
         if status_msg:
-            await status_msg.edit_text("✅ Готово! Файл отправлен.")
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
     finally:
         _downloading.discard(key)
 
